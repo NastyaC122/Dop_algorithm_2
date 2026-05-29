@@ -1,18 +1,17 @@
-﻿#include <iostream>
+#include <iostream>
 #include <fstream>
 #include <sstream>
 #include <vector>
 #include <string>
 #include <cstdint>
 #include <algorithm>
-#include <unordered_map>
 #include <climits>
 #include <cmath>
-#include <functional>
-#include <stdexcept> 
+#include <stdexcept>
 
 using namespace std;
 
+// ---------- простой парсер JSON ----------
 string read_file(const string& filename) {
     ifstream f(filename);
     if (!f) {
@@ -37,7 +36,7 @@ string parse_string(const string& s, int& pos) {
         if (s[pos] == '\\') { ++pos; }
         res += s[pos++];
     }
-    if (pos < s.size()) ++pos; 
+    if (pos < s.size()) ++pos;
     return res;
 }
 
@@ -53,15 +52,14 @@ int parse_int(const string& s, int& pos) {
     return val * sign;
 }
 
-void parse_wallet(const string& s, int& pos, vector<pair<int, int>>& wallet) {
+void parse_wallet(const string& s, int& pos, vector<pair<int,int>>& wallet) {
     skip_ws(s, pos);
     if (s[pos] != '[') throw runtime_error("Ожидался символ '['");
     ++pos;
     if (s[pos] == ']') { ++pos; return; }
-    //номинал и количество
     while (true) {
         skip_ws(s, pos);
-        if (s[pos] == '[') { 
+        if (s[pos] == '[') {
             ++pos;
             int a = parse_int(s, pos);
             skip_ws(s, pos);
@@ -79,7 +77,7 @@ void parse_wallet(const string& s, int& pos, vector<pair<int, int>>& wallet) {
 }
 
 struct Input {
-    vector<pair<int, int>> wallet;
+    vector<pair<int,int>> wallet;
     int amount;
     string strategy;
 };
@@ -89,18 +87,18 @@ Input parse_input(const string& filename) {
     Input inp;
     int pos = 0;
     skip_ws(data, pos);
-
+    
     bool in_array = false;
     if (pos < data.size() && data[pos] == '[') {
         in_array = true;
         ++pos;
         skip_ws(data, pos);
     }
-
+    
     if (pos >= data.size() || data[pos] != '{')
         throw runtime_error("Ожидался объект JSON");
     ++pos;
-
+    
     while (true) {
         skip_ws(data, pos);
         if (data[pos] == '}') break;
@@ -110,27 +108,21 @@ Input parse_input(const string& filename) {
         ++pos;
         if (key == "wallet") {
             parse_wallet(data, pos, inp.wallet);
-        }
-        else if (key == "amount") {
+        } else if (key == "amount") {
             inp.amount = parse_int(data, pos);
-        }
-        else if (key == "strategy") {
+        } else if (key == "strategy") {
             inp.strategy = parse_string(data, pos);
-        }
-        else {
+        } else {
             throw runtime_error("Неизвестный ключ: " + key);
         }
         skip_ws(data, pos);
         if (data[pos] == ',') { ++pos; continue; }
     }
     ++pos;
-
+    
     if (in_array) {
         skip_ws(data, pos);
-        if (pos < data.size() && data[pos] == ',') {
-            ++pos;
-            skip_ws(data, pos);
-        }
+        if (pos < data.size() && data[pos] == ',') ++pos;
         skip_ws(data, pos);
         if (pos >= data.size() || data[pos] != ']')
             throw runtime_error("Ожидался символ ']' в конце массива");
@@ -139,7 +131,7 @@ Input parse_input(const string& filename) {
     return inp;
 }
 
-void write_output(const string& filename, const vector<pair<int, int>>& dispense) {
+void write_output(const string& filename, const vector<pair<int,int>>& dispense) {
     ofstream f(filename);
     f << "{\"dispense\":[";
     for (size_t i = 0; i < dispense.size(); ++i) {
@@ -149,6 +141,7 @@ void write_output(const string& filename, const vector<pair<int, int>>& dispense
     f << "]}\n";
 }
 
+// ---------- Битовый набор для быстрой проверки достижимости (рюкзак)----------
 struct BitSet {
     vector<uint64_t> bits;
     int n;
@@ -177,6 +170,7 @@ struct BitSet {
     }
 };
 
+// Проверка, можно ли набрать сумму amount заданными купюрами с ограничениями max_counts
 bool can_make(int amount, const vector<int>& max_counts, const vector<int>& denoms) {
     BitSet reachable(amount + 1);
     reachable.set(0);
@@ -196,18 +190,75 @@ bool can_make(int amount, const vector<int>& max_counts, const vector<int>& deno
     return reachable.test(amount);
 }
 
+// ---------- Стратегии MAX и MIN (жадный выбор с проверкой остатка) ----------
+vector<pair<int,int>> solve_max_min_greedy(vector<pair<int,int>> wallet, int amount, const string& strat) {
+    // Сортируем кошелёк в нужном порядке
+    if (strat == "MAX") {
+        sort(wallet.begin(), wallet.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    } else { // MIN
+        sort(wallet.begin(), wallet.end(), [](auto& a, auto& b) { return a.first < b.first; });
+    }
+    
+    int N = wallet.size();
+    vector<int> counts(N, 0);
+    int rem = amount;
+    
+    for (int i = 0; i < N; ++i) {
+        int d = wallet[i].first;
+        int max_avail = wallet[i].second;
+        int max_take = min(max_avail, rem / d);
+        
+        // Пробуем взять максимально возможное количество, проверяя, что остаток можно добрать
+        bool found = false;
+        for (int take = max_take; take >= 0; --take) {
+            int new_rem = rem - take * d;
+            // Если это последний номинал или остаток 0 – достаточно
+            if (new_rem == 0) {
+                counts[i] = take;
+                rem = new_rem;
+                found = true;
+                break;
+            }
+            if (i == N - 1) continue; // следующих номиналов нет
+            
+            // Формируем список оставшихся купюр
+            vector<int> sub_denoms, sub_counts;
+            for (int j = i + 1; j < N; ++j) {
+                sub_denoms.push_back(wallet[j].first);
+                sub_counts.push_back(wallet[j].second);
+            }
+            if (can_make(new_rem, sub_counts, sub_denoms)) {
+                counts[i] = take;
+                rem = new_rem;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return {}; // не удалось подобрать – решения нет
+    }
+    
+    if (rem != 0) return {};
+    
+    vector<pair<int,int>> res;
+    for (int i = 0; i < N; ++i) {
+        if (counts[i] > 0)
+            res.emplace_back(wallet[i].first, counts[i]);
+    }
+    return res;
+}
 
+// ---------- Стратегия UNIFORM ----------
 vector<int> get_solution(int amount, const vector<int>& max_counts, const vector<int>& denoms) {
     int N = denoms.size();
     vector<int> dp(amount + 1, -1);
-    vector<int> item(amount + 1, -1); 
+    vector<int> item(amount + 1, -1);
     dp[0] = 0;
     int chunk_idx = 0;
     vector<int> chunk_coin, chunk_take;
     for (int i = 0; i < N; ++i) {
         int d = denoms[i];
         int c = max_counts[i];
-        int k = 1;
+        int k =1;
         while (c > 0) {
             int take = min(k, c);
             int val = take * d;
@@ -226,7 +277,7 @@ vector<int> get_solution(int amount, const vector<int>& max_counts, const vector
             k <<= 1;
         }
     }
-    if (dp[amount] == -1) return {}; 
+    if (dp[amount] == -1) return {};
     vector<int> counts(N, 0);
     int cur = amount;
     while (cur > 0) {
@@ -239,115 +290,7 @@ vector<int> get_solution(int amount, const vector<int>& max_counts, const vector
     return counts;
 }
 
-const int SUFFIX_DP_LIMIT = 50000; 
-
-vector<pair<int, int>> solve_max_min_suffix(const vector<pair<int, int>>& wallet_sorted, int amount) {
-    int N = wallet_sorted.size();
-    vector<BitSet> dp(N + 1, BitSet(amount + 1));
-    dp[N].set(0);
-    for (int i = N - 1; i >= 0; --i) {
-        dp[i] = dp[i + 1];
-        int d = wallet_sorted[i].first;
-        int c = wallet_sorted[i].second;
-        int k = 1;
-        while (c > 0) {
-            int take = min(k, c);
-            int shift = take * d;
-            if (shift <= amount) dp[i].shift_or(shift);
-            c -= take;
-            k <<= 1;
-        }
-    }
-    int rem = amount;
-    vector<int> counts(N, 0);
-    for (int i = 0; i < N; ++i) {
-        int d = wallet_sorted[i].first;
-        int c = wallet_sorted[i].second;
-        int max_take = min(c, rem / d);
-        for (int take = max_take; take >= 0; --take) {
-            if (dp[i + 1].test(rem - take * d)) {
-                counts[i] = take;
-                rem -= take * d;
-                break;
-            }
-        }
-    }
-    if (rem != 0) return {};
-    vector<pair<int, int>> res;
-    for (int i = 0; i < N; ++i) {
-        if (counts[i] > 0)
-            res.emplace_back(wallet_sorted[i].first, counts[i]);
-    }
-    return res;
-}
-
-vector<pair<int, int>> solve_max_min_dfs(const vector<pair<int, int>>& wallet_ordered, int amount) {
-    int N = wallet_ordered.size();
-    vector<int> denoms(N), counts(N);
-    for (int i = 0; i < N; ++i) {
-        denoms[i] = wallet_ordered[i].first;
-        counts[i] = wallet_ordered[i].second;
-    }
-    vector<long long> suff_max(N + 1, 0);
-    for (int i = N - 1; i >= 0; --i) {
-        suff_max[i] = suff_max[i + 1] + (long long)denoms[i] * counts[i];
-    }
-    unordered_map<long long, bool> memo;
-    std::function<bool(int, int)> dfs;
-    dfs = [&](int idx, int rem) -> bool {
-        if (rem == 0) return true;
-        if (idx == N || rem < 0 || rem > suff_max[idx]) return false;
-        long long key = (long long)idx * (amount + 1) + rem;
-        auto it = memo.find(key);
-        if (it != memo.end()) return it->second;
-        int d = denoms[idx];
-        int maxc = min(counts[idx], rem / d);
-        for (int k = maxc; k >= 0; --k) {
-            if (dfs(idx + 1, rem - k * d)) {
-                memo[key] = true;
-                return true;
-            }
-        }
-        memo[key] = false;
-        return false;
-        };
-    if (!dfs(0, amount)) return {};
-    vector<int> res_counts(N, 0);
-    int rem = amount;
-    for (int i = 0; i < N; ++i) {
-        int d = denoms[i];
-        int maxc = min(counts[i], rem / d);
-        for (int k = maxc; k >= 0; --k) {
-            if (dfs(i + 1, rem - k * d)) {
-                res_counts[i] = k;
-                rem -= k * d;
-                break;
-            }
-        }
-    }
-    vector<pair<int, int>> res;
-    for (int i = 0; i < N; ++i)
-        if (res_counts[i] > 0)
-            res.emplace_back(denoms[i], res_counts[i]);
-    return res;
-}
-
-vector<pair<int, int>> solve_max_min(vector<pair<int, int>> wallet, int amount, const string& strat) {
-    if (strat == "MAX") {
-        sort(wallet.begin(), wallet.end(), [](auto& a, auto& b) { return a.first > b.first; });
-    }
-    else { //MIN
-        sort(wallet.begin(), wallet.end(), [](auto& a, auto& b) { return a.first < b.first; });
-    }
-    if (amount <= SUFFIX_DP_LIMIT) {
-        return solve_max_min_suffix(wallet, amount);
-    }
-    else {
-        return solve_max_min_dfs(wallet, amount);
-    }
-}
-
-vector<pair<int, int>> solve_uniform(const vector<pair<int, int>>& wallet, int amount) {
+vector<pair<int,int>> solve_uniform(const vector<pair<int,int>>& wallet, int amount) {
     int N = wallet.size();
     vector<int> denoms(N), orig_counts(N);
     int max_c = 0, min_c = INT_MAX;
@@ -365,6 +308,7 @@ vector<pair<int, int>> solve_uniform(const vector<pair<int, int>>& wallet, int a
     int best_diff = INF;
     int best_M = -1, best_m = -1, best_D = -1;
 
+    // Сценарий 1: минимум = 0, максимум <= M
     {
         int low = 0, high = max_c;
         while (low < high) {
@@ -379,11 +323,12 @@ vector<pair<int, int>> solve_uniform(const vector<pair<int, int>>& wallet, int a
         vector<int> limits(N);
         for (int i = 0; i < N; ++i) limits[i] = min(orig_counts[i], low);
         if (can_make(amount, limits, denoms)) {
-            best_diff = low;   
+            best_diff = low;
             best_M = low;
         }
     }
 
+    // Сценарий 2: используются все номиналы, минимум = m >= 1, максимум <= m + D
     int max_m = min(1000, min_c);
     for (int m = 1; m <= max_m; ++m) {
         if (amount < (long long)m * N) break;
@@ -422,41 +367,39 @@ vector<pair<int, int>> solve_uniform(const vector<pair<int, int>>& wallet, int a
 
     if (best_diff == INF) return {};
 
-    //итог из купюр
     vector<int> result_counts;
     if (best_M != -1) {
         vector<int> limits(N);
         for (int i = 0; i < N; ++i) limits[i] = min(orig_counts[i], best_M);
         result_counts = get_solution(amount, limits, denoms);
-    }
-    else {
+    } else {
         int m = best_m, D = best_D;
         vector<int> limits(N);
         for (int i = 0; i < N; ++i) limits[i] = min(orig_counts[i], m + D) - m;
         vector<int> y = get_solution(amount - m * N, limits, denoms);
         result_counts.resize(N);
-        for (int i = 0; i < N; ++i) result_counts[i] = y[i] + m;
+        for (int i= 0; i < N; ++i) result_counts[i] = y[i] + m;
     }
 
-    vector<pair<int, int>> dispense;
+    vector<pair<int,int>> dispense;
     for (int i = 0; i < N; ++i)
         if (result_counts[i] > 0)
             dispense.emplace_back(denoms[i], result_counts[i]);
     return dispense;
 }
 
+// ---------- главная функция ----------
 int main() {
-    vector<pair<int, int>> dispense;
+    vector<pair<int,int>> dispense;
     try {
         Input inp = parse_input("input.json");
+
         if (inp.strategy == "MAX" || inp.strategy == "MIN") {
-            dispense = solve_max_min(inp.wallet, inp.amount, inp.strategy);
-        }
-        else if (inp.strategy == "UNIFORM") {
+            dispense = solve_max_min_greedy(inp.wallet, inp.amount, inp.strategy);
+        } else if (inp.strategy == "UNIFORM") {
             dispense = solve_uniform(inp.wallet, inp.amount);
         }
-    }
-    catch (const exception& e) {
+    } catch (const exception& e) {
         cerr << "Ошибка: " << e.what() << endl;
         dispense.clear();
     }
